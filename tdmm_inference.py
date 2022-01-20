@@ -14,6 +14,7 @@ if __name__ == "__main__":
 
     parser = ArgumentParser()
     parser.add_argument("--data_dir", default="", help="directory containing images to inference")
+    parser.add_argument("--share_dir", default="", help="share_dir")
     parser.add_argument("--gpu", action="store_true", help="run the inference on gpu")
     parser.add_argument("--with_eye", action="store_true", help="use eye part for extracting texture")
     parser.add_argument("--tdmm_checkpoint", default=None, help="path to checkpoint of the tdmm estimator model to restore")
@@ -24,16 +25,7 @@ if __name__ == "__main__":
     checkpoint = torch.load(opt.tdmm_checkpoint, map_location=torch.device('cpu'))
 
     tdmm = TDMMEstimator()
-    tdmm.load_state_dict(checkpoint['tdmm'])
-    # optimizer_tdmm = torch.optim.Adam(tdmm.parameters(), betas=(0.9, 0.999))
-
-    # ckpt = {
-    #     'tdmm': tdmm.state_dict(),
-    #     'optimizer_tdmm': optimizer_tdmm.state_dict(),
-    #     'epoch': 0,
-    # }
-    # torch.save(ckpt, 'temp-ckpt.path.tar')
-    
+    tdmm.load_state_dict(checkpoint['tdmm'])    
 
     if opt.gpu:
         tdmm = tdmm.cuda()
@@ -43,7 +35,7 @@ if __name__ == "__main__":
     dataset = DBImageDataset2(
         None,
         opt.data_dir,
-        '/hdd/share/youtube-speech',
+        opt.share_dir,
         augmentation_params=config['dataset_params']['augmentation_params'],
         limit=100)
     dataloader = DataLoader(dataset, batch_size=1, num_workers=1)

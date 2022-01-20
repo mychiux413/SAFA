@@ -14,10 +14,10 @@ dataset_params:
 
 train_params:
   num_epochs: 60
-  num_repeats: 2
+  num_repeats: 1
   lr_tdmm: 2.0e-4
-  batch_size: 32
-  checkpoint_freq: 5
+  batch_size: 128
+  checkpoint_freq: 1
   loss_weights:
     landmark: 1
     tdmm_param: 1.0e-2

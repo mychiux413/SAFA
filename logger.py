@@ -12,7 +12,7 @@ import collections
 
 from optic_flow_utils import *
 
-from modules.util import make_coordinate_grid
+from modules.util import make_coordinate_grid, device
 
 
 class Logger:
@@ -54,24 +54,23 @@ class Logger:
 
     @staticmethod
     def load_cpk(checkpoint_path, generator=None, discriminator=None, kp_detector=None, tdmm=None,
-                 optimizer_generator=None, optimizer_discriminator=None, optimizer_kp_detector=None, optimizer_tdmm=None,
-                 local_rank=None):
+                 optimizer_generator=None, optimizer_discriminator=None, optimizer_kp_detector=None, optimizer_tdmm=None):
         checkpoint = torch.load(checkpoint_path, map_location=torch.device('cpu'))
         if generator is not None:
             generator.load_state_dict(checkpoint['generator'])
-            generator.to(local_rank)
+            generator.to(device)
         if kp_detector is not None:
             kp_detector.load_state_dict(checkpoint['kp_detector'])
-            kp_detector.to(local_rank)
+            kp_detector.to(device)
 
         if tdmm is not None:
             tdmm.load_state_dict(checkpoint['tdmm'])
-            tdmm.to(local_rank)
+            tdmm.to(device)
 
         if discriminator is not None:
             try:
                 discriminator.load_state_dict(checkpoint['discriminator'])
-                discriminator.to(local_rank)
+                discriminator.to(device)
             except:
                print ('No discriminator in the state-dict. Dicriminator will be randomly initialized')
         if optimizer_generator is not None:

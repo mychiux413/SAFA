@@ -4,6 +4,7 @@ import torch.nn.functional as F
 import torch
 import torchvision.models as models
 
+device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
 def kp2gaussian(kp, spatial_size, kp_variance):
     """

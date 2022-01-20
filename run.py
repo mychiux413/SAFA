@@ -11,11 +11,9 @@ from modules.discriminator import MultiScaleDiscriminator
 from modules.keypoint_detector import KPDetector
 from modules.tdmm_estimator import TDMMEstimator
 
-from train_ddp import train, train_tdmm
+from train import train, train_tdmm
 from reconstruction import reconstruction
 from animate import animate
-
-import torch.distributed as dist
 
 
 if __name__ == "__main__":
@@ -24,7 +22,6 @@ if __name__ == "__main__":
         raise Exception("You must use Python 3 or higher. Recommended version is Python 3.7")
 
     parser = ArgumentParser()
-    parser.add_argument("--local_rank", default=0, type=int)
     parser.add_argument("--limit", default=0, type=int, help="data limit")
     parser.add_argument("--config", required=True, help="path to config")
     parser.add_argument("--dataset_type", help="dataset_type", default=None)
@@ -45,16 +42,10 @@ if __name__ == "__main__":
         log_dir += ' ' + strftime("%d_%m_%y_%H.%M.%S", gmtime())
 
     if opt.mode == 'train' or opt.mode == 'train_tdmm':
-        local_rank = opt.local_rank
-        os.environ['MASTER_ADDR'] = 'localhost'
-        os.environ['MASTER_PORT'] = '5678'
-        dist.init_process_group('gloo', rank=0, world_size=1)
-
-        if local_rank == 0:
-            if not os.path.exists(log_dir):
-                os.makedirs(log_dir)
-            if not os.path.exists(os.path.join(log_dir, os.path.basename(opt.config))):
-                copy(opt.config, log_dir)
+        if not os.path.exists(log_dir):
+            os.makedirs(log_dir)
+        if not os.path.exists(os.path.join(log_dir, os.path.basename(opt.config))):
+            copy(opt.config, log_dir)
 
     with open(opt.config) as f:
         config = yaml.load(f)
@@ -84,11 +75,11 @@ if __name__ == "__main__":
 
     if opt.mode == 'train':
         print("Training...")
-        train(config, generator, discriminator, kp_detector, tdmm, log_dir, dataset, local_rank, 
+        train(config, generator, discriminator, kp_detector, tdmm, log_dir, dataset, 
               with_eye=opt.with_eye, checkpoint=opt.checkpoint, tdmm_checkpoint=opt.tdmm_checkpoint)
     elif opt.mode == 'train_tdmm':
         print("Training tdmm ...")
-        train_tdmm(config, tdmm, log_dir, dataset, local_rank, tdmm_checkpoint=opt.tdmm_checkpoint)
+        train_tdmm(config, tdmm, log_dir, dataset, tdmm_checkpoint=opt.tdmm_checkpoint)
     elif opt.mode == 'reconstruction':
         print("Reconstruction...")
         reconstruction(config, generator, kp_detector, tdmm, 

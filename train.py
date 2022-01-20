@@ -8,9 +8,7 @@ from torch.optim.lr_scheduler import MultiStepLR
 
 from torch.utils.data import DataLoader
 from frames_dataset import DatasetRepeater
-
-import torch.distributed as dist
-from torch.nn.parallel import DistributedDataParallel as DDP
+from modules.util import device
 
 
 def fix_bn(m):
@@ -19,7 +17,7 @@ def fix_bn(m):
         m.eval()
 
 def train(config, generator, discriminator, kp_detector, tdmm, 
-          log_dir, dataset, local_rank, with_eye=True, checkpoint=None, tdmm_checkpoint=None):
+          log_dir, dataset, with_eye=True, checkpoint=None, tdmm_checkpoint=None):
     train_params = config['train_params']
 
     optimizer_generator = torch.optim.Adam(generator.parameters(), lr=train_params['lr_generator'], betas=(0.5, 0.999))
@@ -30,8 +28,7 @@ def train(config, generator, discriminator, kp_detector, tdmm,
     if checkpoint is not None:
         start_epoch = Logger.load_cpk(checkpoint, generator, discriminator, kp_detector,
                                       optimizer_generator, optimizer_discriminator,
-                                      None if train_params['lr_kp_detector'] == 0 else optimizer_kp_detector,
-                                      local_rank)
+                                      None if train_params['lr_kp_detector'] == 0 else optimizer_kp_detector)
     else:
         start_epoch = 0
         tdmm_checkpoint = torch.load(tdmm_checkpoint, map_location=torch.device('cpu'))
@@ -49,33 +46,24 @@ def train(config, generator, discriminator, kp_detector, tdmm,
     if 'num_repeats' in train_params or train_params['num_repeats'] != 1:
         dataset = DatasetRepeater(dataset, train_params['num_repeats'])
 
-    train_sampler = torch.utils.data.distributed.DistributedSampler(dataset)
-    dataloader = DataLoader(dataset, batch_size=train_params['batch_size'], num_workers=4, sampler=train_sampler)
+    dataloader = DataLoader(dataset, batch_size=train_params['batch_size'], num_workers=4, shuffle=True)
 
     generator_full = GeneratorFullModel(kp_detector, generator, discriminator, tdmm, train_params, with_eye=with_eye)
-    generator_full = torch.nn.SyncBatchNorm.convert_sync_batchnorm(generator_full)
     discriminator_full = DiscriminatorFullModel(kp_detector, generator, discriminator, train_params)
-    discriminator_full = torch.nn.SyncBatchNorm.convert_sync_batchnorm(discriminator_full)
 
-    if torch.cuda.is_available():
-        generator_full.to(local_rank)
-        discriminator_full.to(local_rank)
-        generator_full = DDP(generator_full, device_ids=[local_rank], output_device=local_rank, find_unused_parameters=True)
-        discriminator_full = DDP(discriminator_full, device_ids=[local_rank], output_device=local_rank, find_unused_parameters=True)
+    generator_full.to(device)
+    discriminator_full.to(device)
 
     # fix bn layers of pretrained tdmm model 
     generator_full._module_copies[0].tdmm.apply(fix_bn)
 
     with Logger(log_dir=log_dir, visualizer_params=config['visualizer_params'], checkpoint_freq=train_params['checkpoint_freq']) as logger:
         for epoch in trange(start_epoch, train_params['num_epochs']):
-
-            dataloader.sampler.set_epoch(epoch)
-
             for x in tqdm(dataloader):
-                x['source'] = x['source'].to(local_rank)
-                x['driving'] = x['driving'].to(local_rank)
-                x['source_ldmk_2d'] = x['source_ldmk_2d'].to(local_rank)
-                x['driving_ldmk_2d'] = x['driving_ldmk_2d'].to(local_rank)
+                x['source'] = x['source'].to(device)
+                x['driving'] = x['driving'].to(device)
+                x['source_ldmk_2d'] = x['source_ldmk_2d'].to(device)
+                x['driving_ldmk_2d'] = x['driving_ldmk_2d'].to(device)
 
                 losses_generator, generated = generator_full(x)
 
@@ -111,50 +99,43 @@ def train(config, generator, discriminator, kp_detector, tdmm,
             scheduler_kp_detector.step()
             scheduler_tdmm.step()
 
-            if dist.get_rank() == 0:
-                logger.log_epoch(epoch, {'generator': generator,
-                                        'discriminator': discriminator,
-                                        'kp_detector': kp_detector,
-                                        'tdmm': tdmm,
-                                        'optimizer_generator': optimizer_generator,
-                                        'optimizer_discriminator': optimizer_discriminator,
-                                        'optimizer_kp_detector': optimizer_kp_detector,
-                                        'optimizer_tdmm': optimizer_tdmm}, inp=x, out=generated)
+            logger.log_epoch(epoch, {'generator': generator,
+                                    'discriminator': discriminator,
+                                    'kp_detector': kp_detector,
+                                    'tdmm': tdmm,
+                                    'optimizer_generator': optimizer_generator,
+                                    'optimizer_discriminator': optimizer_discriminator,
+                                    'optimizer_kp_detector': optimizer_kp_detector,
+                                    'optimizer_tdmm': optimizer_tdmm}, inp=x, out=generated)
 
 
-def train_tdmm(config, tdmm, log_dir, dataset, local_rank, tdmm_checkpoint=None):
+def train_tdmm(config, tdmm, log_dir, dataset, tdmm_checkpoint=None):
     train_params = config['train_params']
     optimizer_tdmm = torch.optim.Adam(tdmm.parameters(), lr=train_params['lr_tdmm'], betas=(0.9, 0.999))
 
     if tdmm_checkpoint is not None:
-        start_epoch = Logger.load_cpk(tdmm_checkpoint, tdmm=tdmm, optimizer_tdmm=optimizer_tdmm, local_rank=local_rank)
+        start_epoch = Logger.load_cpk(tdmm_checkpoint, tdmm=tdmm, optimizer_tdmm=optimizer_tdmm)
     else:
         start_epoch = 0
 
     if 'num_repeats' in train_params or train_params['num_repeats'] != 1:
         dataset = DatasetRepeater(dataset, train_params['num_repeats'])
 
-    train_sampler = torch.utils.data.distributed.DistributedSampler(dataset)
-    dataloader = DataLoader(dataset, batch_size=train_params['batch_size'], num_workers=4, sampler=train_sampler)
+    dataloader = DataLoader(dataset, batch_size=train_params['batch_size'], num_workers=4, shuffle=True)
 
     tdmm_full = TdmmFullModel(tdmm)
     tdmm.apply(fix_bn)
-    # tdmm_full = torch.nn.SyncBatchNorm.convert_sync_batchnorm(tdmm_full)
 
-    if torch.cuda.is_available():
-        tdmm_full.to(local_rank)
-        tdmm_full = DDP(tdmm_full, device_ids=[local_rank], output_device=local_rank, find_unused_parameters=False)
-
+    tdmm_full.to(device)
     logger = Logger(log_dir, checkpoint_freq=train_params['checkpoint_freq'])
 
     print("start epoch", start_epoch)
     for epoch in trange(start_epoch, train_params['num_epochs']):
-        dataloader.sampler.set_epoch(epoch)
         bar = tqdm(dataloader)
         for i, x in enumerate(bar):
             optimizer_tdmm.zero_grad()
-            x['image'] = x['image'].to(local_rank)
-            x['ldmk'] = x['ldmk'].to(local_rank)
+            x['image'] = x['image'].to(device)
+            x['ldmk'] = x['ldmk'].to(device)
 
             losses_tdmm = tdmm_full(x)
 
@@ -170,5 +151,4 @@ def train_tdmm(config, tdmm, log_dir, dataset, local_rank, tdmm_checkpoint=None)
             losses = {key: value.data for key, value in losses_tdmm.items()}
             logger.log_iter(losses=losses)
 
-        if dist.get_rank() == 0:
-            logger.log_epoch_tdmm(epoch, {'tdmm': tdmm, 'optimizer_tdmm': optimizer_tdmm})
+        logger.log_epoch_tdmm(epoch, {'tdmm': tdmm, 'optimizer_tdmm': optimizer_tdmm})
