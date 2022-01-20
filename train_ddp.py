@@ -138,17 +138,20 @@ def train_tdmm(config, tdmm, log_dir, dataset, local_rank, tdmm_checkpoint=None)
     dataloader = DataLoader(dataset, batch_size=train_params['batch_size'], num_workers=4, sampler=train_sampler)
 
     tdmm_full = TdmmFullModel(tdmm)
-    tdmm_full = torch.nn.SyncBatchNorm.convert_sync_batchnorm(tdmm_full)
+    tdmm.apply(fix_bn)
+    # tdmm_full = torch.nn.SyncBatchNorm.convert_sync_batchnorm(tdmm_full)
 
     if torch.cuda.is_available():
         tdmm_full.to(local_rank)
-        tdmm_full = DDP(tdmm_full, device_ids=[local_rank], output_device=local_rank, find_unused_parameters=True)
+        tdmm_full = DDP(tdmm_full, device_ids=[local_rank], output_device=local_rank, find_unused_parameters=False)
 
     logger = Logger(log_dir, checkpoint_freq=train_params['checkpoint_freq'])
 
+    print("start epoch", start_epoch)
     for epoch in trange(start_epoch, train_params['num_epochs']):
         dataloader.sampler.set_epoch(epoch)
-        for i, x in tqdm(enumerate(dataloader)):
+        bar = tqdm(dataloader)
+        for i, x in enumerate(bar):
             optimizer_tdmm.zero_grad()
             x['image'] = x['image'].to(local_rank)
             x['ldmk'] = x['ldmk'].to(local_rank)
@@ -159,7 +162,7 @@ def train_tdmm(config, tdmm, log_dir, dataset, local_rank, tdmm_checkpoint=None)
             loss = sum(loss_values)
 
             if i % 10 == 0:
-                print('batch ldmk loss: ', loss)
+                bar.set_description(f'batch ldmk loss: {loss.item():0.4f}')
 
             loss.backward()
             optimizer_tdmm.step()

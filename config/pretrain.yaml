@@ -4,7 +4,7 @@ dataset_params:
   frame_shape: [256, 256, 3]
   augmentation_params:
     flip_param:
-      horizontal_flip: True
+      horizontal_flip: False
       time_flip: False
     jitter_param:
       brightness: 0.1
@@ -13,7 +13,7 @@ dataset_params:
       hue: 0.1
 
 train_params:
-  num_epochs: 50
+  num_epochs: 60
   num_repeats: 2
   lr_tdmm: 2.0e-4
   batch_size: 32

@@ -4,14 +4,12 @@ from argparse import ArgumentParser
 from time import gmtime, strftime
 from shutil import copy
 
-from frames_dataset import FramesDataset, ImageDataset
+from frames_dataset import DBImageDataset2, FramesDataset, ImageDataset, DBImageDataset
 
 from modules.generator import OcclusionAwareGenerator
 from modules.discriminator import MultiScaleDiscriminator
 from modules.keypoint_detector import KPDetector
 from modules.tdmm_estimator import TDMMEstimator
-
-import torch
 
 from train_ddp import train, train_tdmm
 from reconstruction import reconstruction
@@ -26,8 +24,12 @@ if __name__ == "__main__":
         raise Exception("You must use Python 3 or higher. Recommended version is Python 3.7")
 
     parser = ArgumentParser()
-    parser.add_argument("--local_rank", default=-1, type=int)
+    parser.add_argument("--local_rank", default=0, type=int)
+    parser.add_argument("--limit", default=0, type=int, help="data limit")
     parser.add_argument("--config", required=True, help="path to config")
+    parser.add_argument("--dataset_type", help="dataset_type", default=None)
+    parser.add_argument("--data_root", required=True, help="data_root")
+    parser.add_argument("--share_root", required=True, help="share_root")
     parser.add_argument("--with_eye", action="store_true", help="use eye part for extracting texture")
     parser.add_argument("--mode", default="train", choices=["train", "train_tdmm", "reconstruction", "animate"])
     parser.add_argument("--log_dir", default='log', help="path to log into")
@@ -44,9 +46,9 @@ if __name__ == "__main__":
 
     if opt.mode == 'train' or opt.mode == 'train_tdmm':
         local_rank = opt.local_rank
-        print("local rank: ", local_rank)
-        torch.cuda.set_device(local_rank)
-        dist.init_process_group(backend='nccl')
+        os.environ['MASTER_ADDR'] = 'localhost'
+        os.environ['MASTER_PORT'] = '5678'
+        dist.init_process_group('gloo', rank=0, world_size=1)
 
         if local_rank == 0:
             if not os.path.exists(log_dir):
@@ -60,9 +62,12 @@ if __name__ == "__main__":
     if opt.mode == 'train_tdmm':
         tdmm = TDMMEstimator()
 
-        dataset = ImageDataset(data_dir=config['dataset_params']['root_dir'], 
-                               meta_dir=config['dataset_params']['meta_dir'],
-                               augmentation_params=config['dataset_params']['augmentation_params'])
+        dataset = DBImageDataset2(
+            opt.dataset_type,
+            opt.data_root,
+            opt.share_root,
+            augmentation_params=config['dataset_params']['augmentation_params'],
+            limit=opt.limit)
     else:
         generator = OcclusionAwareGenerator(**config['model_params']['generator_params'],
                                         **config['model_params']['common_params'])

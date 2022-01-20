@@ -1,3 +1,4 @@
+from io import BytesIO
 import os
 import cv2
 from skimage import io, img_as_float32
@@ -257,3 +258,332 @@ class ImageDataset(Dataset):
         return out
 
 
+class DBImageDataset(object):
+
+    def __init__(
+            self, dataset_type, data_root, share_root,
+            db_address='localhost', db_name='speech',
+            limit=0, augmentation_params=None,
+            ):
+        if augmentation_params:
+            self.transform = AllAugmentationTransform(**augmentation_params)
+        else:
+            self.transform = None
+
+        assert os.path.exists(share_root)
+        self.db_address = db_address
+        self.db_name = db_name
+
+        self.conn = None
+        self.init_connection()
+        script = """
+            SELECT y.id, y.frame_count FROM youtube_speech AS y
+            JOIN dataset_type AS d
+                ON d.id = y.dataset_type_id
+            WHERE
+                d.value {}
+                AND y.valid = true
+                AND y.path IS NOT NULL
+                AND y.mel IS NOT NULL
+        """
+        print(f"**** Dataset Type: {dataset_type} ****")
+        if dataset_type is None:
+            script = script.format(" IS NOT NULL")
+        elif isinstance(dataset_type, list):
+            dataset_type = " IN ({})".format(", ".join([f"'{d}'" for d in dataset_type]))
+        elif dataset_type == "train":
+            dataset_type = "NOT LIKE '%test%'"
+        elif dataset_type == "test":
+            dataset_type = "LIKE '%test%'"
+        else:
+            dataset_type = f"= '{dataset_type}'"
+        script = script.format(dataset_type)
+
+        if limit > 0:
+            script += "\nlimit {}".format(limit)
+        self.cur.execute(script)
+
+        self.landmarks_cache = {}
+        self.data_ids = []
+        for row in self.cur.fetchall():
+            self.landmarks_cache[row['id']] = None
+            self.data_ids.append((row['id'], row['frame_count']))
+        self.data_root = data_root
+        if not os.path.exists(self.data_root):
+            os.makedirs(self.data_root)
+        self.share_root = share_root
+        self.data_len = len(self.data_ids)
+
+        print(f"{self.data_len} videos")
+        assert self.data_len > 0, f'no data found, the script is: {script}'
+        self.conn.close()
+        self.close_connection()
+
+        self.info_script = """
+        SELECT bboxes, landmarks, frame_count, path, h, w FROM youtube_speech
+        WHERE id = {}
+        """
+
+    def init_connection(self):
+        if self.conn is not None:
+            return
+        from mysql.connector import connect
+        self.conn = connect(
+            user="root",
+            password="root",
+            host=self.db_address,
+            port="3456",
+            database=self.db_name,
+            charset='utf8mb4',
+        )
+        self.cur = self.conn.cursor(dictionary=True)
+
+    def close_connection(self):
+        self.cur.close()
+        self.conn.close()
+        self.conn = None
+
+    def get_video_info(self, youtube_speech_id: int):
+        self.init_connection()
+        self.cur.execute(self.info_script.format(youtube_speech_id))
+        row = self.cur.fetchone()
+        bboxes = np.load(BytesIO(row['bboxes']))
+        landmarks = np.load(BytesIO(row['landmarks'])).astype(np.float32)
+        return {
+            'bboxes': bboxes,
+            'landmarks': landmarks,
+            'path': row['path'],
+            'frame_count': row['frame_count'],
+            'h': row['h'],
+            'w': row['w'],
+        }
+
+    def read_and_cache(self, youtube_speech_id, iframe):
+        img_path = os.path.join(self.data_root, str(youtube_speech_id), f'{iframe}.png')
+        if not os.path.exists(img_path):
+            os.makedirs(os.path.join(self.data_root, str(youtube_speech_id)), exist_ok=False)
+            info = self.get_video_info(youtube_speech_id)
+            src_video_path = os.path.join(self.share_root, info['path'])
+            assert os.path.exists(src_video_path)
+
+
+            # *****  each ****
+            landmarks = info['landmarks']
+            bboxes = info['bboxes']
+            for i in range(info['frame_count']):
+                bbox = bboxes[i]
+                x0, y0, x1, y1 = bbox
+                x0 = max(0, x0)
+                y0 = max(0, y0)
+                x1 = min(info['w'], x1)
+                y1 = min(info['h'], y1)
+                w = x1 - x0
+                h = y1 - y0
+
+                bboxes[i, 0] = x0
+                bboxes[i, 1] = y0
+                bboxes[i, 2] = x1
+                bboxes[i, 3] = y1
+
+                landmarks[i, :, 0] = landmarks[i, :, 0] - x0
+                landmarks[i, :, 1] = landmarks[i, :, 1] - y0
+
+                landmarks[i, :, 0] = landmarks[i, :, 0] * 256 / w
+                landmarks[i, :, 1] = landmarks[i, :, 1] * 256 / h
+            # ***********
+
+            # bboxes = info['bboxes']
+            # landmarks = info['landmarks']
+            # x0 = max(0, bboxes[:, 0].mean())
+            # y0 = max(0, bboxes[:, 1].mean())
+            # x1 = min(info['w'], bboxes[:, 2].mean())
+            # y1 = min(info['h'], bboxes[:, 3].mean())
+            # w = x1 - x0
+            # h = y1 - y0
+
+            # landmarks[:, :, 0] = landmarks[:, :, 0] - x0
+            # landmarks[:, :, 1] = landmarks[:, :, 1] - y0
+
+            # landmarks[:, :, 0] = landmarks[:, :, 0] * 256 / w
+            # landmarks[:, :, 1] = landmarks[:, :, 1] * 256 / h
+
+            landmarks_path = os.path.join(self.data_root, str(youtube_speech_id), 'landmarks.npy')
+            np.save(landmarks_path, landmarks)
+            self.landmarks_cache[youtube_speech_id] = landmarks
+
+            cap = cv2.VideoCapture(src_video_path)
+            for i in range(info['frame_count']):
+                _, img = cap.read()
+
+                bbox = bboxes[i]
+                x0, y0, x1, y1 = bbox
+                img = img[y0:y1, x0:x1]
+                img = cv2.resize(img, (256, 256))
+                path = os.path.join(self.data_root, str(youtube_speech_id), f'{i}.png')
+                cv2.imwrite(path, img)
+                if i == iframe:
+                    output_img = img
+            cap.release()
+        else:
+            output_img = cv2.imread(img_path)
+        output_img = output_img[:, :, ::-1]
+        output_img = output_img.astype(np.float32) / 255.0
+        landmarks = self.read_landmarks(youtube_speech_id)
+        ldmk = landmarks[iframe]
+        return {
+            'image': output_img,
+            'ldmk': ldmk,
+        }
+
+    def read_landmarks(self, youtube_speech_id: int):
+        """return: frame_count x 68 x 2"""
+        landmarks = self.landmarks_cache.get(youtube_speech_id)
+        if landmarks is not None:
+            return landmarks
+        path = os.path.join(self.data_root, str(youtube_speech_id), 'landmarks.npy')
+        landmarks = np.load(path)
+        self.landmarks_cache[youtube_speech_id] = landmarks
+        return landmarks
+
+    def __len__(self):
+        return self.data_len
+
+    def __getitem__(self, idx):
+        youtube_speech_id, frame_count = self.data_ids[idx]
+        iframe = np.random.randint(frame_count)
+        out = self.read_and_cache(youtube_speech_id, iframe)
+
+        image = [out['image']]
+        f_flip = False
+        if self.transform:
+            image, _, f_flip = self.transform(image)
+        
+        image = np.array(image[0], dtype='float32')
+
+        out['image'] = image.transpose((2, 0, 1))
+        if f_flip:
+            out['ldmk'][:, 0] = image.shape[1] - out['ldmk'][:, 0]
+        return out
+
+
+class DBImageDataset2(object):
+
+    def __init__(
+            self, dataset_type, data_root, share_root,
+            db_address='localhost', db_name='speech',
+            limit=0, augmentation_params=None,
+            ):
+        if augmentation_params:
+            self.transform = AllAugmentationTransform(**augmentation_params)
+        else:
+            self.transform = None
+
+        assert os.path.exists(share_root)
+        self.db_address = db_address
+        self.db_name = db_name
+
+        self.init_connection()
+        script = """
+            SELECT y.id, y.path, y.frame_count FROM youtube_speech AS y
+            JOIN dataset_type AS d
+                ON d.id = y.dataset_type_id
+            WHERE
+                d.value {}
+                AND y.valid = true
+                AND y.path IS NOT NULL
+                AND y.mel IS NOT NULL
+        """
+        print(f"**** Dataset Type: {dataset_type} ****")
+        if dataset_type is None:
+            script = script.format(" IS NOT NULL")
+        elif isinstance(dataset_type, list):
+            dataset_type = " IN ({})".format(", ".join([f"'{d}'" for d in dataset_type]))
+        elif dataset_type == "train":
+            dataset_type = "NOT LIKE '%test%'"
+        elif dataset_type == "test":
+            dataset_type = "LIKE '%test%'"
+        else:
+            dataset_type = f"= '{dataset_type}'"
+        script = script.format(dataset_type)
+
+        if limit > 0:
+            script += "\nlimit {}".format(limit)
+        self.cur.execute(script)
+
+        self.landmarks_cache = {}
+        self.id_path_map = {}
+        self.data_ids = []
+        for row in self.cur.fetchall():
+            self.id_path_map[row['id']] = row['path']
+            self.landmarks_cache[row['id']] = None
+            for j in range(row['frame_count']):
+                self.data_ids.append((row['id'], j))
+        self.data_root = data_root
+        if not os.path.exists(self.data_root):
+            os.makedirs(self.data_root)
+        self.share_root = share_root
+        self.data_len = len(self.data_ids)
+
+        print(f"{len(self.id_path_map)} videos, {self.data_len} data length")
+        assert self.data_len > 0, f'no data found, the script is: {script}'
+        self.conn.close()
+        self.close_connection()
+
+    def init_connection(self):
+        from mysql.connector import connect
+        self.conn = connect(
+            user="root",
+            password="root",
+            host=self.db_address,
+            port="3456",
+            database=self.db_name,
+            charset='utf8mb4',
+        )
+        self.cur = self.conn.cursor(dictionary=True)
+
+    def close_connection(self):
+        self.cur.close()
+        self.conn.close()
+        self.conn = None
+
+    def read_landmarks(self, youtube_speech_id: int, dump_dirpath: str):
+        """return: frame_count x 68 x 2"""
+        landmarks = self.landmarks_cache.get(youtube_speech_id)
+        if landmarks is not None:
+            return landmarks
+        path = os.path.join(dump_dirpath, 'landmarks.npy')
+        landmarks = np.load(path) * 255.0
+        self.landmarks_cache[youtube_speech_id] = landmarks
+        return landmarks
+    @classmethod
+    def img_as_float32(cls, path):
+        img = cv2.imread(path)[:, :, ::-1]
+        img = img.astype(np.float32) / 255.0
+        return img
+
+    def __len__(self):
+        return self.data_len
+
+    def __getitem__(self, idx):
+        youtube_speech_id, iframe = self.data_ids[idx]
+        path = self.id_path_map[youtube_speech_id]
+        filename = os.path.basename(path)
+        dump_dirpath = os.path.join(self.data_root, filename[:-4])
+        img_path = os.path.join(dump_dirpath, f'{iframe}.webp')
+
+        image = [self.img_as_float32(img_path)]
+
+        f_flip = False
+        if self.transform:
+            image, _, f_flip = self.transform(image)
+        
+        image = np.array(image[0], dtype='float32')
+
+        out = {}
+        out['image'] = image.transpose((2, 0, 1))
+        landmarks = self.read_landmarks(youtube_speech_id, dump_dirpath)
+        out['ldmk'] = landmarks[iframe]
+        if f_flip:
+            print("**** NO!!! FLIP !!! ****")
+            out['ldmk'][:, 0] = image.shape[1] - out['ldmk'][:, 0]
+        return out
