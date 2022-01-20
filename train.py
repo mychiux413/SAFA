@@ -109,7 +109,7 @@ def train(config, generator, discriminator, kp_detector, tdmm,
                                     'optimizer_tdmm': optimizer_tdmm}, inp=x, out=generated)
 
 
-def train_tdmm(config, tdmm, log_dir, dataset, tdmm_checkpoint=None):
+def train_tdmm(config, tdmm, log_dir, dataset, tdmm_checkpoint=None, amp=False):
     train_params = config['train_params']
     optimizer_tdmm = torch.optim.Adam(tdmm.parameters(), lr=train_params['lr_tdmm'], betas=(0.9, 0.999))
 
@@ -129,6 +129,9 @@ def train_tdmm(config, tdmm, log_dir, dataset, tdmm_checkpoint=None):
     tdmm_full.to(device)
     logger = Logger(log_dir, checkpoint_freq=train_params['checkpoint_freq'])
 
+    if amp:
+        scaler = torch.cuda.amp.GradScaler()
+
     print("start epoch", start_epoch)
     for epoch in trange(start_epoch, train_params['num_epochs']):
         bar = tqdm(dataloader)
@@ -137,16 +140,26 @@ def train_tdmm(config, tdmm, log_dir, dataset, tdmm_checkpoint=None):
             x['image'] = x['image'].to(device)
             x['ldmk'] = x['ldmk'].to(device)
 
-            losses_tdmm = tdmm_full(x)
+            if amp:
+                with torch.cuda.amp.autocast():
+                    losses_tdmm = tdmm_full(x)
+                    loss_values = [val for val in losses_tdmm.values()]
+                    loss = sum(loss_values)
+            else:
+                losses_tdmm = tdmm_full(x)
+                loss_values = [val for val in losses_tdmm.values()]
+                loss = sum(loss_values)
 
-            loss_values = [val for val in losses_tdmm.values()]
-            loss = sum(loss_values)
-
-            if i % 10 == 0:
+            if i % 100 == 0:
                 bar.set_description(f'batch ldmk loss: {loss.item():0.4f}')
 
-            loss.backward()
-            optimizer_tdmm.step()
+            if amp:
+                scaler.scale(loss).backward()
+                scaler.step(optimizer_tdmm)
+                scaler.update()
+            else:
+                loss.backward()
+                optimizer_tdmm.step()
 
             losses = {key: value.data for key, value in losses_tdmm.items()}
             logger.log_iter(losses=losses)

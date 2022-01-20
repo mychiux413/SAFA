@@ -28,6 +28,7 @@ if __name__ == "__main__":
     parser.add_argument("--data_root", required=True, help="data_root")
     parser.add_argument("--share_root", required=True, help="share_root")
     parser.add_argument("--with_eye", action="store_true", help="use eye part for extracting texture")
+    parser.add_argument("--amp", action="store_true", help="use auto mixed precision")
     parser.add_argument("--mode", default="train", choices=["train", "train_tdmm", "reconstruction", "animate"])
     parser.add_argument("--log_dir", default='log', help="path to log into")
     parser.add_argument("--checkpoint", default=None, help="path to checkpoint of the whole model to restore")
@@ -79,7 +80,7 @@ if __name__ == "__main__":
               with_eye=opt.with_eye, checkpoint=opt.checkpoint, tdmm_checkpoint=opt.tdmm_checkpoint)
     elif opt.mode == 'train_tdmm':
         print("Training tdmm ...")
-        train_tdmm(config, tdmm, log_dir, dataset, tdmm_checkpoint=opt.tdmm_checkpoint)
+        train_tdmm(config, tdmm, log_dir, dataset, tdmm_checkpoint=opt.tdmm_checkpoint, amp=opt.amp)
     elif opt.mode == 'reconstruction':
         print("Reconstruction...")
         reconstruction(config, generator, kp_detector, tdmm, 
